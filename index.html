@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>TBM meeting app</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Core Firebase SDK and Realtime Database -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #111b21;
+      color: white;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    header {
+      background: #202c33;
+      padding: 12px;
+      text-align: center;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    
+    #login {
+      text-align: center;
+      margin-top: 80px;
+      padding: 20px;
+    }
+    
+    input,
+    button {
+      padding: 12px;
+      margin: 5px;
+      width: 90%;
+      max-width: 300px;
+      border-radius: 8px;
+      border: none;
+      font-size: 16px;
+    }
+    
+    button {
+      background: #00a884;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    
+    #app {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      height: calc(100vh - 45px);
+    }
+    
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      background: #0b141a;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .msg {
+      background: #202c33;
+      padding: 10px;
+      border-radius: 10px;
+      max-width: 80%;
+      word-wrap: break-word;
+    }
+
+    .msg button {
+      padding: 4px 8px;
+      font-size: 12px;
+      background: #ea0038;
+      width: auto;
+      margin-top: 5px;
+    }
+    
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 10px;
+      background: #202c33;
+      position: sticky;
+      bottom: 0;
+    }
+    
+    #msg {
+      flex: 1;
+      min-width: 120px;
+    }
+    
+    #controls button {
+      width: auto;
+      flex: 1;
+      min-width: 70px;
+    }
+
+    audio {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+
+<header>TBM meeting app 🚀</header>
+
+<!-- JOIN -->
+<div id="login">
+  <h3>Enter Name + Room</h3>
+  <input id="name" placeholder="Your name" />
+  <input id="room" placeholder="Room name" />
+  <button onclick="join()">Join</button>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <div id="chat"></div>
+
+  <div id="controls">
+    <input id="msg" placeholder="Type message..." onkeypress="if(event.key==='Enter') send()" />
+    <button onclick="send()">Send</button>
+    <button onclick="toggleMic()">🎤 Mic</button>
+    <button onclick="startCall()">📞 Call</button>
+    <button onclick="hangUp()">❌ Hang up</button>
+  </div>
+
+  <!-- Hidden audio element for WebRTC streaming -->
+  <audio id="remoteAudio" autoplay controls></audio>
+</div>
+
+<script>
+  // Paste your exact Firebase web app credentials here
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    databaseURL: "https://YOUR_PROJECT.firebaseio.com",
+    projectId: "YOUR_PROJECT"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  let user = "";
+  let room = "";
+  let myUid = Math.random().toString(36).substring(2, 9); // Create unique identifier
+
+  let stream;
+  let pc;
+  let isCaller = false;
+
+  const servers = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+    ]
+  };
+
+  // JOIN ROOM
+  function join() {
+    user = document.getElementById("name").value.trim();
+    room = document.getElementById("room").value.trim() || "global";
+
+    if (!user) return alert("Enter name!");
+
+    document.getElementById("login").style.display = "none";
+    document.getElementById("app").style.display = "flex";
+
+    loadChat();
+    setupCallSignals();
+  }
+
+  // CHAT SEND
+  function send() {
+    let text = document.getElementById("msg").value.trim();
+    if (!text) return;
+
+    db.ref("rooms/" + room).push({
+      user,
+      text,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    });
+
+    document.getElementById("msg").value = "";
+  }
+
+  // CHAT LOADER
+  function loadChat() {
+    const chatArea = document.getElementById("chat");
+
+    db.ref("rooms/" + room).on("child_added", snap => {
+      let d = snap.val();
+      let id = snap.key;
+      
+      let div = document.createElement("div");
+      div.className = "msg";
+      div.id = "msg-" + id;
+      
+      div.innerHTML = `
+        <b>${d.user}</b><br>
+        ${d.text}<br>
+        <small style="color:#8696a0;">${d.time}</small><br>
+        <button onclick="deleteMsg('${id}')">🗑 Delete</button>
+      `;
+      
+      chatArea.appendChild(div);
+      chatArea.scrollTop = chatArea.scrollHeight;
+    });
+
+    db.ref("rooms/" + room).on("child_removed", snap => {
+      let element = document.getElementById("msg-" + snap.key);
+      if (element) element.remove();
+    });
+  }
+
+  function deleteMsg(id) {
+    db.ref("rooms/" + room + "/" + id).remove();
+  }
+
+  // REUSABLE WEBRTC SETUP
+  async function initWebRTC() {
+    stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+    pc = new RTCPeerConnection(servers);
+
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+    pc.ontrack = e => {
+      const remoteAudio = document.getElementById("remoteAudio");
+      if (remoteAudio.srcObject !== e.streams[0]) {
+        remoteAudio.srcObject = e.streams[0];
+      }
+    };
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        // Namespace candidates using your unique user ID so players do not read their own back
+        db.ref(`calls/${room}/candidates/${myUid}`).push(JSON.stringify(e.candidate));
+      }
+    };
+  }
+
+  // 📞 START OUTBOUND CALL
+  async function startCall() {
+    if (pc) return alert("Call session already running!");
+    isCaller = true;
+
+    try {
+      await initWebRTC();
+
+      let offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Clean up previous dead streams before pushing the new offer
+      await db.ref("calls/" + room).remove();
+
+      await db.ref("calls/" + room + "/offer").set(JSON.stringify(offer));
+      
+      // Start listening to the other user's candidate pool
+      listenForRemoteCandidates();
+    } catch (err) {
+      console.error("Error starting voice call:", err);
+      alert("Could not initialize call or access microphone.");
+    }
+  }
+
+  // LISTEN INCOMING SIGNALS
+  function setupCallSignals() {
+    // Callee looks for incoming offers
+    db.ref("calls/" + room + "/offer").on("value", async snap => {
+      if (!snap.val() || isCaller) return; 
+
+      if (!pc) {
+        try {
+          await initWebRTC();
+          
+          let offer = JSON.parse(snap.val());
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+          let answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+
+          await db.ref("calls/" + room + "/answer").set(JSON.stringify(answer));
+          
+          listenForRemoteCandidates();
+        } catch (err) {
+          console.error("Error connecting inbound call:", err);
+        }
+      }
+    });
+
+    // Caller looks for incoming answers
+    db.ref("calls/" + room + "/answer").on("value", async snap => {
+      if (!snap.val() || !isCaller || !pc) return;
+      if (pc.signalingState === "have-local-offer") {
+        let answer = JSON.parse(snap.val());
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+    });
+
+    // Handle remote cancellations or hang ups
+    db.ref("calls/" + room).on("value", snap => {
+      if (!snap.val() && pc) {
+        localHangUp();
+      }
+    });
+  }
+
+  // ICE CANDIDATE PROCESSING
+  function listenForRemoteCandidates() {
+    db.ref(`calls/${room}/candidates`).on("child_added", snap => {
+      // Ignore your own candidate pool
+      if (snap.key === myUid) return;
+
+      snap.ref.on("child_added", candidateSnap => {
+        if (pc && pc.remoteDescription) {
+          let candidate = new RTCIceCandidate(JSON.parse(candidateSnap.val()));
+          pc.addIceCandidate(candidate).catch(e => console.error("Error adding candidate:", e));
+        }
+      });
+    });
+  }
+
+  // 🎤 MIC TOGGLE
+  function toggleMic() {
+    if (!stream) return alert("No active call!");
+    stream.getAudioTracks().forEach(t => {
+      t.enabled = !t.enabled;
+      alert(t.enabled ? "Microphone Unmuted" : "Microphone Muted");
+    });
+  }
+
+  // ❌ HANG UP MECHANICS
+  function hangUp() {
+    db.ref("calls/" + room).remove(); // Clears DB to alert peer to shut down
+    localHangUp();
+  }
+
+  function localHangUp() {
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      stream = null;
+    }
+    document.getElementById("remoteAudio").srcObject = null;
+    isCaller = false;
+  }
+</script>
+
+</body>
+</html>
